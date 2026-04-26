@@ -153,7 +153,7 @@
     /************************************************************
      * CONFIGURACIÓN
      ************************************************************/
-    const GAS_URL = "https://script.google.com/macros/s/AKfycbyNMdNSy5x5pppWslHOqM5N4R61-tEFA-1zmQu4U4UscOfn9CNkStkiqQILT-HKA9F-CQ/exec";
+    const GAS_URL = "https://script.google.com/macros/s/AKfycbz5NtLAfuLU2Wy6FUgHD9EvGS_9jVsa8WrjaY83eAnigHPki2pDa8Bt0V9VX_rb2MNiQg/exec";
 
     const OCR_MAX_WIDTH = 1600;
     const PDF_MAX_WIDTH = 1400;
@@ -302,11 +302,11 @@
         .trim();
 
       const patterns = [
-        /\b([FB]\s*[0-9OIL]{3})\s*[-: ]+\s*(\d{1,10})\b/i,
+        /\b([FB]\s*[A-Z0-9OIL]{3})\s*[-: ]+\s*(\d{1,10})\b/i,
 
-        /\b(?:SERIE|SER)\s*[:\-]?\s*([FB]\s*[0-9OIL]{3})\b.{0,40}?\b(?:N[°º]?|NRO|NUMERO|NÚMERO|CORRELATIVO)?\s*[:\-]?\s*(\d{1,10})\b/i,
+        /\b(?:SERIE|SER)\s*[:\-]?\s*([FB]\s*[A-Z0-9OIL]{3})\b.{0,40}?\b(?:N[°º]?|NRO|NUMERO|NÚMERO|CORRELATIVO)?\s*[:\-]?\s*(\d{1,10})\b/i,
 
-        /\b(?:FACTURA|BOLETA|COMPROBANTE|ELECTRÓNICA|ELECTRONICA)?\s*([FB]\s*[0-9OIL]{3})\s*[-: ]+\s*(\d{1,10})\b/i
+        /\b(?:FACTURA|BOLETA|COMPROBANTE|ELECTRÓNICA|ELECTRONICA)?\s*([FB]\s*[A-Z0-9OIL]{3})\s*[-: ]+\s*(\d{1,10})\b/i
       ];
 
       for (const pattern of patterns) {
@@ -320,7 +320,7 @@
         }
       }
 
-      const serieMatch = clean.match(/\b([FB]\s*[0-9OIL]{3})\b/i);
+      const serieMatch = clean.match(/\b([FB]\s*[A-Z0-9OIL]{3})\b/i);
 
       if (serieMatch) {
         const serie = normalizeSerie(serieMatch[1]);
@@ -341,18 +341,26 @@
     }
 
     function normalizeSerie(value) {
-      let raw = String(value || "")
-        .toUpperCase()
-        .replace(/\s+/g, "");
+  let raw = String(value || "")
+    .toUpperCase()
+    .replace(/\s+/g, "")
+    .replace(/[^A-Z0-9]/g, "");
 
-      const first = raw.charAt(0);
-      let rest = raw.slice(1)
-        .replace(/O/g, "0")
-        .replace(/I/g, "1")
-        .replace(/L/g, "1");
+  const first = raw.charAt(0);
+  let rest = raw.slice(1, 4);
 
-      return first + rest;
-    }
+  // Si la serie parece numérica, corregimos errores comunes del OCR:
+  // O -> 0, I -> 1, L -> 1
+  // Ejemplo: FOO1 -> F001
+  if (/^[0-9OIL]{3}$/.test(rest)) {
+    rest = rest
+      .replace(/O/g, "0")
+      .replace(/I/g, "1")
+      .replace(/L/g, "1");
+  }
+
+  return first + rest;
+}
 
     function normalizeCorrelativo(value) {
       return String(value || "").replace(/\D/g, "");
@@ -363,7 +371,7 @@
      ************************************************************/
     async function saveVoucher() {
       try {
-        if (GAS_URL === "https://script.google.com/macros/s/AKfycbyNMdNSy5x5pppWslHOqM5N4R61-tEFA-1zmQu4U4UscOfn9CNkStkiqQILT-HKA9F-CQ/exec") {
+        if (!GAS_URL || GAS_URL.includes("PEGA_AQUI")) {
           throw new Error("Primero debes colocar la URL de tu Apps Script en GAS_URL.");
         }
 
@@ -375,8 +383,8 @@
         const correlativo = correlativoInput.value.trim();
         const motivo = motivoInput.value;
 
-        if (!/^[FB][0-9]{3}$/.test(serie)) {
-          throw new Error("Serie inválida. Usa formato peruano, por ejemplo: F001 o B002.");
+        if (!/^[FB][A-Z0-9]{3}$/.test(serie)) {
+          throw new Error("Serie inválida. Usa 4 caracteres, por ejemplo: F001, FABC, B002 o B1A2.");
         }
 
         if (!/^\d{1,10}$/.test(correlativo)) {
@@ -410,14 +418,7 @@
 
         setStatus("Enviando datos a Google Apps Script...", "normal");
 
-        await fetch(GAS_URL, {
-          method: "POST",
-          mode: "no-cors",
-          headers: {
-            "Content-Type": "text/plain;charset=utf-8"
-          },
-          body: JSON.stringify(payload)
-        });
+        await postToAppsScript(payload);
 
         setStatus("Datos enviados. Confirmando registro en Google Sheets...", "normal");
 
@@ -619,6 +620,64 @@
     function sleep(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
     }
+
+    function postToAppsScript(payload) {
+  return new Promise((resolve, reject) => {
+    try {
+      const iframeName = "hidden_iframe_" + Date.now();
+
+      const iframe = document.createElement("iframe");
+      iframe.name = iframeName;
+      iframe.style.display = "none";
+      document.body.appendChild(iframe);
+
+      const form = document.createElement("form");
+      form.method = "POST";
+      form.action = GAS_URL;
+      form.target = iframeName;
+      form.style.display = "none";
+
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "payload";
+      input.value = JSON.stringify(payload);
+
+      form.appendChild(input);
+      document.body.appendChild(form);
+
+      let resolved = false;
+
+      iframe.onload = function () {
+        if (!resolved) {
+          resolved = true;
+
+          setTimeout(() => {
+            form.remove();
+            iframe.remove();
+          }, 500);
+
+          resolve();
+        }
+      };
+
+      form.submit();
+
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+
+          form.remove();
+          iframe.remove();
+
+          resolve();
+        }
+      }, 2500);
+
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
   </script>
 </body>
 </html>
