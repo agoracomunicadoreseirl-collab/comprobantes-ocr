@@ -1,1 +1,624 @@
 
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Registro de comprobantes OCR</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: Arial, sans-serif;
+      margin: 16px;
+      background: #f5f5f5;
+      color: #111;
+    }
+
+    .box {
+      max-width: 560px;
+      margin: auto;
+      background: #fff;
+      padding: 16px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+    }
+
+    h1 {
+      font-size: 20px;
+      margin-top: 0;
+    }
+
+    label {
+      display: block;
+      margin-top: 12px;
+      font-weight: bold;
+    }
+
+    input,
+    select,
+    button,
+    textarea {
+      width: 100%;
+      margin-top: 6px;
+      padding: 10px;
+      font-size: 15px;
+    }
+
+    button {
+      cursor: pointer;
+      border: 0;
+      background: #222;
+      color: #fff;
+      border-radius: 6px;
+    }
+
+    button:disabled {
+      background: #999;
+      cursor: not-allowed;
+    }
+
+    .secondary {
+      background: #555;
+    }
+
+    .preview {
+      width: 100%;
+      max-height: 360px;
+      object-fit: contain;
+      border: 1px solid #ddd;
+      margin-top: 12px;
+      background: #fafafa;
+    }
+
+    .status {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 6px;
+      background: #eee;
+      font-size: 14px;
+      white-space: pre-wrap;
+    }
+
+    .ok {
+      background: #d9f7df;
+      color: #145c20;
+    }
+
+    .error {
+      background: #ffe0e0;
+      color: #8a1111;
+    }
+
+    progress {
+      width: 100%;
+      margin-top: 12px;
+      display: none;
+    }
+
+    textarea {
+      height: 120px;
+      resize: vertical;
+      font-size: 12px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="box">
+    <h1>Registro de comprobantes</h1>
+
+    <label>Imagen del comprobante</label>
+    <input id="imageInput" type="file" accept="image/*" capture="environment" />
+
+    <img id="preview" class="preview" alt="Vista previa" style="display:none;" />
+
+    <progress id="progress" value="0" max="100"></progress>
+
+    <button id="btnOcr" class="secondary" type="button">
+      Leer OCR nuevamente
+    </button>
+
+    <label>Serie</label>
+    <input id="serie" type="text" placeholder="Ej: F001, B002" maxlength="4" />
+
+    <label>Número correlativo</label>
+    <input id="correlativo" type="text" placeholder="Ej: 00012345" />
+
+    <label>Motivo</label>
+    <select id="motivo">
+      <option value="">Seleccionar</option>
+      <option value="compra">Compra</option>
+      <option value="venta">Venta</option>
+    </select>
+
+    <button id="btnGuardar" type="button">
+      Guardar comprobante
+    </button>
+
+    <label>Texto OCR detectado</label>
+    <textarea id="ocrText" readonly placeholder="Aquí aparecerá el texto detectado..."></textarea>
+
+    <div id="status" class="status">Selecciona una imagen para iniciar.</div>
+  </div>
+
+  <script>
+    /************************************************************
+     * CONFIGURACIÓN
+     ************************************************************/
+    const GAS_URL = "PEGA_AQUI_TU_URL_DE_APPS_SCRIPT";
+
+    const OCR_MAX_WIDTH = 1600;
+    const PDF_MAX_WIDTH = 1400;
+    const IMAGE_QUALITY = 0.75;
+    const MAX_BASE64_SIZE = 9 * 1024 * 1024;
+
+    let selectedFile = null;
+    let originalDataUrl = null;
+    let ocrWorker = null;
+
+    const imageInput = document.getElementById("imageInput");
+    const preview = document.getElementById("preview");
+    const progress = document.getElementById("progress");
+    const btnOcr = document.getElementById("btnOcr");
+    const btnGuardar = document.getElementById("btnGuardar");
+    const serieInput = document.getElementById("serie");
+    const correlativoInput = document.getElementById("correlativo");
+    const motivoInput = document.getElementById("motivo");
+    const ocrText = document.getElementById("ocrText");
+    const statusBox = document.getElementById("status");
+
+    imageInput.addEventListener("change", handleImageChange);
+    btnOcr.addEventListener("click", runOCR);
+    btnGuardar.addEventListener("click", saveVoucher);
+
+    /************************************************************
+     * EVENTO: CARGAR IMAGEN
+     ************************************************************/
+    async function handleImageChange(event) {
+      try {
+        resetStatus();
+
+        const file = event.target.files[0];
+
+        if (!file) {
+          throw new Error("No se seleccionó ninguna imagen.");
+        }
+
+        if (!file.type.startsWith("image/")) {
+          throw new Error("El archivo seleccionado no es una imagen válida.");
+        }
+
+        selectedFile = file;
+        originalDataUrl = await fileToDataURL(file);
+
+        preview.src = originalDataUrl;
+        preview.style.display = "block";
+
+        serieInput.value = "";
+        correlativoInput.value = "";
+        ocrText.value = "";
+
+        setStatus("Imagen cargada. Ejecutando OCR...", "normal");
+
+        await runOCR();
+
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    /************************************************************
+     * OCR CON TESSERACT
+     ************************************************************/
+    async function runOCR() {
+      try {
+        if (!selectedFile) {
+          throw new Error("Primero debes cargar una imagen.");
+        }
+
+        disableButtons(true);
+        showProgress(true, 0);
+        setStatus("Preparando imagen para OCR...", "normal");
+
+        const ocrImage = await resizeImageToDataURL(selectedFile, OCR_MAX_WIDTH, 0.85);
+
+        if (!ocrWorker) {
+          ocrWorker = await Tesseract.createWorker("eng", 1, {
+            logger: function (m) {
+              if (m.status === "recognizing text") {
+                const percent = Math.round((m.progress || 0) * 100);
+                showProgress(true, percent);
+                setStatus("Leyendo OCR... " + percent + "%", "normal");
+              }
+            }
+          });
+
+          await ocrWorker.setParameters({
+            tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_/ .:°º\n",
+            preserve_interword_spaces: "1"
+          });
+        }
+
+        const result = await ocrWorker.recognize(ocrImage);
+        const text = result.data.text || "";
+
+        ocrText.value = text.trim();
+
+        if (!text.trim()) {
+          throw new Error("OCR vacío. Intenta con una imagen más clara o tomada de frente.");
+        }
+
+        const extracted = extractVoucherData(text);
+
+        if (extracted.serie) {
+          serieInput.value = extracted.serie;
+        }
+
+        if (extracted.correlativo) {
+          correlativoInput.value = extracted.correlativo;
+        }
+
+        if (!extracted.serie || !extracted.correlativo) {
+          setStatus(
+            "OCR completado, pero no se detectó serie/correlativo automáticamente. Puedes escribirlos manualmente.",
+            "normal"
+          );
+        } else {
+          setStatus(
+            "OCR completado. Serie y correlativo detectados.",
+            "ok"
+          );
+        }
+
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        showProgress(false, 0);
+        disableButtons(false);
+      }
+    }
+
+    /************************************************************
+     * REGEX PARA COMPROBANTES PERUANOS
+     * Ejemplos buscados:
+     * F001-00001234
+     * B002 00012345
+     * Serie: F001 Número: 12345
+     ************************************************************/
+    function extractVoucherData(text) {
+      const clean = text
+        .toUpperCase()
+        .replace(/[–—]/g, "-")
+        .replace(/[|]/g, "1")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      const patterns = [
+        /\b([FB]\s*[0-9OIL]{3})\s*[-: ]+\s*(\d{1,10})\b/i,
+
+        /\b(?:SERIE|SER)\s*[:\-]?\s*([FB]\s*[0-9OIL]{3})\b.{0,40}?\b(?:N[°º]?|NRO|NUMERO|NÚMERO|CORRELATIVO)?\s*[:\-]?\s*(\d{1,10})\b/i,
+
+        /\b(?:FACTURA|BOLETA|COMPROBANTE|ELECTRÓNICA|ELECTRONICA)?\s*([FB]\s*[0-9OIL]{3})\s*[-: ]+\s*(\d{1,10})\b/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = clean.match(pattern);
+
+        if (match) {
+          return {
+            serie: normalizeSerie(match[1]),
+            correlativo: normalizeCorrelativo(match[2])
+          };
+        }
+      }
+
+      const serieMatch = clean.match(/\b([FB]\s*[0-9OIL]{3})\b/i);
+
+      if (serieMatch) {
+        const serie = normalizeSerie(serieMatch[1]);
+        const index = clean.indexOf(serieMatch[1]);
+        const nearText = clean.slice(index, index + 100);
+        const numberMatch = nearText.match(/(?:-|N[°º]?|NRO|NUMERO|NÚMERO|CORRELATIVO)?\s*[:\- ]+\s*(\d{3,10})\b/i);
+
+        return {
+          serie,
+          correlativo: numberMatch ? normalizeCorrelativo(numberMatch[1]) : ""
+        };
+      }
+
+      return {
+        serie: "",
+        correlativo: ""
+      };
+    }
+
+    function normalizeSerie(value) {
+      let raw = String(value || "")
+        .toUpperCase()
+        .replace(/\s+/g, "");
+
+      const first = raw.charAt(0);
+      let rest = raw.slice(1)
+        .replace(/O/g, "0")
+        .replace(/I/g, "1")
+        .replace(/L/g, "1");
+
+      return first + rest;
+    }
+
+    function normalizeCorrelativo(value) {
+      return String(value || "").replace(/\D/g, "");
+    }
+
+    /************************************************************
+     * GUARDAR: GENERAR PDF Y ENVIAR A APPS SCRIPT
+     ************************************************************/
+    async function saveVoucher() {
+      try {
+        if (GAS_URL === "https://script.google.com/macros/s/AKfycbyNMdNSy5x5pppWslHOqM5N4R61-tEFA-1zmQu4U4UscOfn9CNkStkiqQILT-HKA9F-CQ/exec") {
+          throw new Error("Primero debes colocar la URL de tu Apps Script en GAS_URL.");
+        }
+
+        if (!selectedFile) {
+          throw new Error("Primero debes cargar una imagen.");
+        }
+
+        const serie = serieInput.value.trim().toUpperCase();
+        const correlativo = correlativoInput.value.trim();
+        const motivo = motivoInput.value;
+
+        if (!/^[FB][0-9]{3}$/.test(serie)) {
+          throw new Error("Serie inválida. Usa formato peruano, por ejemplo: F001 o B002.");
+        }
+
+        if (!/^\d{1,10}$/.test(correlativo)) {
+          throw new Error("Correlativo inválido. Usa solo números, máximo 10 dígitos.");
+        }
+
+        if (!motivo) {
+          throw new Error("Selecciona el motivo: compra o venta.");
+        }
+
+        disableButtons(true);
+        showProgress(true, 0);
+        setStatus("Generando PDF solo con la imagen...", "normal");
+
+        const pdfBase64 = await generatePdfBase64(selectedFile);
+
+        if (pdfBase64.length > MAX_BASE64_SIZE) {
+          throw new Error("El PDF generado es muy grande. Usa una imagen más liviana o con menor resolución.");
+        }
+
+        const id = crypto.randomUUID();
+
+        const payload = {
+          id,
+          serie,
+          correlativo,
+          motivo,
+          fileName: `${motivo}_${serie}-${correlativo}.pdf`,
+          pdfBase64
+        };
+
+        setStatus("Enviando datos a Google Apps Script...", "normal");
+
+        await fetch(GAS_URL, {
+          method: "POST",
+          mode: "no-cors",
+          headers: {
+            "Content-Type": "text/plain;charset=utf-8"
+          },
+          body: JSON.stringify(payload)
+        });
+
+        setStatus("Datos enviados. Confirmando registro en Google Sheets...", "normal");
+
+        const confirmation = await waitForConfirmation(id);
+
+        setStatus(
+          "Guardado correctamente.\n\nURL PDF:\n" + confirmation.url,
+          "ok"
+        );
+
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        showProgress(false, 0);
+        disableButtons(false);
+      }
+    }
+
+    /************************************************************
+     * CONFIRMACIÓN CON JSONP
+     ************************************************************/
+    async function waitForConfirmation(id) {
+      const maxAttempts = 10;
+
+      for (let i = 1; i <= maxAttempts; i++) {
+        await sleep(1200);
+
+        const response = await jsonpRequest({
+          action: "status",
+          id
+        });
+
+        if (response.ok && response.found) {
+          return response;
+        }
+      }
+
+      throw new Error("El envío se realizó, pero no se pudo confirmar el guardado. Revisa Google Sheets.");
+    }
+
+    function jsonpRequest(params) {
+      return new Promise((resolve, reject) => {
+        const callbackName = "jsonp_cb_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
+
+        params.callback = callbackName;
+        params.t = Date.now();
+
+        const query = new URLSearchParams(params).toString();
+        const separator = GAS_URL.includes("?") ? "&" : "?";
+        const url = GAS_URL + separator + query;
+
+        const script = document.createElement("script");
+
+        const timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error("No se recibió respuesta de confirmación."));
+        }, 8000);
+
+        window[callbackName] = function (data) {
+          cleanup();
+          resolve(data);
+        };
+
+        script.onerror = function () {
+          cleanup();
+          reject(new Error("Error consultando confirmación."));
+        };
+
+        function cleanup() {
+          clearTimeout(timeout);
+          delete window[callbackName];
+
+          if (script.parentNode) {
+            script.parentNode.removeChild(script);
+          }
+        }
+
+        script.src = url;
+        document.body.appendChild(script);
+      });
+    }
+
+    /************************************************************
+     * GENERAR PDF SOLO CON LA IMAGEN
+     ************************************************************/
+    async function generatePdfBase64(file) {
+      const imageDataUrl = await resizeImageToDataURL(file, PDF_MAX_WIDTH, IMAGE_QUALITY);
+      const img = await loadImage(imageDataUrl);
+
+      const width = img.width;
+      const height = img.height;
+
+      const orientation = width >= height ? "landscape" : "portrait";
+
+      const { jsPDF } = window.jspdf;
+
+      const pdf = new jsPDF({
+        orientation,
+        unit: "px",
+        format: [width, height],
+        compress: true
+      });
+
+      pdf.addImage(
+        imageDataUrl,
+        "JPEG",
+        0,
+        0,
+        width,
+        height,
+        undefined,
+        "FAST"
+      );
+
+      const dataUri = pdf.output("datauristring");
+
+      return dataUri.split(",")[1];
+    }
+
+    /************************************************************
+     * UTILIDADES DE IMAGEN
+     ************************************************************/
+    function fileToDataURL(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("No se pudo leer la imagen."));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function resizeImageToDataURL(file, maxWidth, quality) {
+      const dataUrl = await fileToDataURL(file);
+      const img = await loadImage(dataUrl);
+
+      let targetWidth = img.width;
+      let targetHeight = img.height;
+
+      if (img.width > maxWidth) {
+        targetWidth = maxWidth;
+        targetHeight = Math.round((img.height * maxWidth) / img.width);
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+
+      const ctx = canvas.getContext("2d");
+
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, targetWidth, targetHeight);
+      ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
+      return canvas.toDataURL("image/jpeg", quality);
+    }
+
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("No se pudo cargar la imagen."));
+        img.src = src;
+      });
+    }
+
+    /************************************************************
+     * UI
+     ************************************************************/
+    function setStatus(message, type) {
+      statusBox.textContent = message;
+      statusBox.className = "status";
+
+      if (type === "ok") {
+        statusBox.classList.add("ok");
+      }
+
+      if (type === "error") {
+        statusBox.classList.add("error");
+      }
+    }
+
+    function resetStatus() {
+      setStatus("Procesando...", "normal");
+    }
+
+    function showProgress(show, value) {
+      progress.style.display = show ? "block" : "none";
+      progress.value = value || 0;
+    }
+
+    function disableButtons(disabled) {
+      btnOcr.disabled = disabled;
+      btnGuardar.disabled = disabled;
+      imageInput.disabled = disabled;
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+  </script>
+</body>
+</html>
